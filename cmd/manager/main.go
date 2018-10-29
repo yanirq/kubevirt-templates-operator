@@ -5,6 +5,7 @@ import (
 	"log"
 	"runtime"
 
+	templatev1 "github.com/openshift/api/template/v1"
 	k8sutil "github.com/operator-framework/operator-sdk/pkg/util/k8sutil"
 	sdkVersion "github.com/operator-framework/operator-sdk/version"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -49,6 +50,11 @@ func main() {
 
 	// Setup Scheme for all resources
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
+		log.Fatal(err)
+	}
+
+	// Setup Scheme for templates
+	if err := templatev1.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Fatal(err)
 	}
 

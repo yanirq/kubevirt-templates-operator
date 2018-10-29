@@ -29,7 +29,6 @@ import (
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
 	"k8s.io/gengo/types"
-	generatorargs "k8s.io/kube-openapi/cmd/openapi-gen/args"
 	openapi "k8s.io/kube-openapi/pkg/common"
 
 	"github.com/golang/glog"
@@ -109,21 +108,6 @@ func DefaultNameSystem() string {
 	return "sorting_namer"
 }
 
-func apiTypeFilterFunc(c *generator.Context, t *types.Type) bool {
-	// There is a conflict between this codegen and codecgen, we should avoid types generated for codecgen
-	if strings.HasPrefix(t.Name.Name, "codecSelfer") {
-		return false
-	}
-	pkg := c.Universe.Package(t.Name.Package)
-	if hasOpenAPITagValue(pkg.Comments, tagValueTrue) {
-		return !hasOpenAPITagValue(t.CommentLines, tagValueFalse)
-	}
-	if hasOpenAPITagValue(t.CommentLines, tagValueTrue) {
-		return true
-	}
-	return false
-}
-
 func Packages(context *generator.Context, arguments *args.GeneratorArgs) generator.Packages {
 	boilerplate, err := arguments.LoadGoBoilerplate()
 	if err != nil {
@@ -136,40 +120,28 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 
 `)...)
 
-	reportFilename := "-"
-	if customArgs, ok := arguments.CustomArgs.(*generatorargs.CustomArgs); ok {
-		reportFilename = customArgs.ReportFilename
-	}
-	context.FileTypes[apiViolationFileType] = apiViolationFile{}
-	siblingPath := ""
-	if len(arguments.OutputBase) > 0 {
-		siblingPath = strings.Repeat(
-			".."+string([]rune{filepath.Separator}),
-			len(filepath.SplitList(arguments.OutputBase)),
-		)
-	}
-
 	return generator.Packages{
 		&generator.DefaultPackage{
 			PackageName: filepath.Base(arguments.OutputPackagePath),
 			PackagePath: arguments.OutputPackagePath,
 			HeaderText:  header,
 			GeneratorFunc: func(c *generator.Context) (generators []generator.Generator) {
-				return []generator.Generator{
-					newOpenAPIGen(
-						arguments.OutputFileBaseName,
-						arguments.OutputPackagePath,
-					),
+				return []generator.Generator{NewOpenAPIGen(arguments.OutputFileBaseName, arguments.OutputPackagePath, context)}
+			},
+			FilterFunc: func(c *generator.Context, t *types.Type) bool {
+				// There is a conflict between this codegen and codecgen, we should avoid types generated for codecgen
+				if strings.HasPrefix(t.Name.Name, "codecSelfer") {
+					return false
 				}
+				pkg := context.Universe.Package(t.Name.Package)
+				if hasOpenAPITagValue(pkg.Comments, tagValueTrue) {
+					return !hasOpenAPITagValue(t.CommentLines, tagValueFalse)
+				}
+				if hasOpenAPITagValue(t.CommentLines, tagValueTrue) {
+					return true
+				}
+				return false
 			},
-			FilterFunc: apiTypeFilterFunc,
-		},
-		&generator.DefaultPackage{
-			PackagePath: siblingPath,
-			GeneratorFunc: func(c *generator.Context) (generators []generator.Generator) {
-				return []generator.Generator{newAPIViolationGen(reportFilename)}
-			},
-			FilterFunc: apiTypeFilterFunc,
 		},
 	}
 }
@@ -185,15 +157,18 @@ type openAPIGen struct {
 	// TargetPackage is the package that will get GetOpenAPIDefinitions function returns all open API definitions.
 	targetPackage string
 	imports       namer.ImportTracker
+	types         []*types.Type
+	context       *generator.Context
 }
 
-func newOpenAPIGen(sanitizedName string, targetPackage string) generator.Generator {
+func NewOpenAPIGen(sanitizedName string, targetPackage string, context *generator.Context) generator.Generator {
 	return &openAPIGen{
 		DefaultGen: generator.DefaultGen{
 			OptionalName: sanitizedName,
 		},
 		imports:       generator.NewImportTracker(),
 		targetPackage: targetPackage,
+		context:       context,
 	}
 }
 
@@ -210,6 +185,15 @@ func (g *openAPIGen) Namers(c *generator.Context) namer.NameSystems {
 			PrependPackageNames: 4, // enough to fully qualify from k8s.io/api/...
 		},
 	}
+}
+
+func (g *openAPIGen) Filter(c *generator.Context, t *types.Type) bool {
+	// There is a conflict between this codegen and codecgen, we should avoid types generated for codecgen
+	if strings.HasPrefix(t.Name.Name, "codecSelfer") {
+		return false
+	}
+	g.types = append(g.types, t)
+	return true
 }
 
 func (g *openAPIGen) isOtherPackage(pkg string) bool {
@@ -244,7 +228,7 @@ func (g *openAPIGen) Init(c *generator.Context, w io.Writer) error {
 	sw.Do("func GetOpenAPIDefinitions(ref $.ReferenceCallback|raw$) map[string]$.OpenAPIDefinition|raw$ {\n", argsFromType(nil))
 	sw.Do("return map[string]$.OpenAPIDefinition|raw${\n", argsFromType(nil))
 
-	for _, t := range c.Order {
+	for _, t := range g.types {
 		err := newOpenAPITypeWriter(sw).generateCall(t)
 		if err != nil {
 			return err
